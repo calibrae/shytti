@@ -33,6 +33,9 @@ echo "=> downloading shytti-${OS}-${ARCH}"
 curl -fsSL "$URL" -o "$BIN"
 chmod +x "$BIN"
 
+# --- Clean stale pairing state ---
+rm -f "$INSTALL_DIR/.shytti-key"
+
 # --- Config ---
 if [ ! -f "$CONFIG" ]; then
     cat > "$CONFIG" <<EOF
