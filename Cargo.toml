@@ -1,0 +1,22 @@
+[package]
+name = "shytti"
+version = "0.1.0"
+edition = "2024"
+description = "Shell orchestrator daemon"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
+axum = "0.8"
+portable-pty = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+tokio-tungstenite = "0.26"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
