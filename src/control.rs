@@ -173,15 +173,24 @@ pub async fn run_control<S, K>(
 
                 match result {
                     Ok(shell_id) => {
-                        let sid = match bridge.attach(&shell_id, manager).await {
-                            Ok(sid) => {
-                                manager.set_session_id(&shell_id, &sid).await;
-                                sid
+                        // If Hermytt provided a session_id, use it.
+                        // Otherwise try bridge attach (Mode 1 only — Mode 2 has no reachable hermytt URL).
+                        let sid = if let Some(sid) = session_id {
+                            manager.set_session_id(&shell_id, &sid).await;
+                            sid
+                        } else if bridge.is_configured() {
+                            match bridge.attach(&shell_id, manager).await {
+                                Ok(sid) => {
+                                    manager.set_session_id(&shell_id, &sid).await;
+                                    sid
+                                }
+                                Err(e) => {
+                                    tracing::warn!(%shell_id, "bridge attach skipped: {e}");
+                                    shell_id.clone()
+                                }
                             }
-                            Err(e) => {
-                                tracing::error!(%shell_id, "bridge attach failed: {e}");
-                                shell_id.clone()
-                            }
+                        } else {
+                            shell_id.clone()
                         };
                         let resp = ControlMsg::SpawnOk {
                             req_id,

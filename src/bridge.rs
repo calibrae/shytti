@@ -19,6 +19,11 @@ impl HermyttBridge {
         }
     }
 
+    /// Returns true if the bridge has a real (non-localhost) hermytt URL configured.
+    pub fn is_configured(&self) -> bool {
+        !self.base_url.contains("localhost") && !self.auth_key.is_empty()
+    }
+
     /// Register a managed session with Hermytt, open WS pipe, bridge PTY I/O.
     pub async fn attach(
         &self,
