@@ -30,7 +30,6 @@ chmod +x "$BIN"
 
 # --- Config ---
 if [ ! -f "$CONFIG" ]; then
-    LISTEN_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || ipconfig getifaddr en0 2>/dev/null || echo "0.0.0.0")
     cat > "$CONFIG" <<EOF
 [daemon]
 listen = "0.0.0.0:7778"
@@ -60,29 +59,21 @@ systemctl daemon-reload
 systemctl enable shytti
 echo "=> systemd service installed"
 
+# --- Kill any stale shytti ---
+pkill -9 -f 'shytti' 2>/dev/null || true
+sleep 1
+
 # --- Pair ---
 echo ""
 echo "============================================"
-echo "  shytti installed. generating pair token..."
+echo "  shytti installed."
+echo "  starting pairing mode..."
+echo ""
+echo "  paste the token below into hermytt admin."
+echo "  after pairing succeeds, press ctrl+c."
+echo "  then: sudo systemctl start shytti"
 echo "============================================"
 echo ""
 
-# Start shytti in background briefly to generate and serve the pair token
-# The pair command starts the daemon and prints the token
-$BIN pair -c "$CONFIG" &
-PAIR_PID=$!
-
-# Wait for it to print the token (it outputs to stdout)
-sleep 2
-
-echo ""
-echo "============================================"
-echo "  paste the token above into hermytt admin"
-echo "  once paired, ctrl+c and start the service:"
-echo ""
-echo "    sudo systemctl start shytti"
-echo "============================================"
-echo ""
-
-# Wait for pairing to complete (hermytt connects, then we can ctrl+c)
-wait $PAIR_PID 2>/dev/null || true
+# Run pair in foreground — sysop ctrl+c's when done
+exec $BIN pair -c "$CONFIG"
