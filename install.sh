@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-# shytti install + pair (Mode 2)
+# shytti install (Mode 2: manual pairing)
 # curl -sSL https://raw.githubusercontent.com/calibrae/shytti/main/install.sh | sudo bash
 
 INSTALL_DIR="/opt/shytti"
@@ -23,6 +23,11 @@ URL="https://github.com/calibrae/shytti/releases/latest/download/shytti-${OS}-${
 # --- Install ---
 echo "=> installing shytti to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
+
+# Stop existing service if running
+systemctl stop shytti 2>/dev/null || true
+pkill -9 -f 'shytti' 2>/dev/null || true
+sleep 1
 
 echo "=> downloading shytti-${OS}-${ARCH}"
 curl -fsSL "$URL" -o "$BIN"
@@ -57,23 +62,24 @@ EOF
 
 systemctl daemon-reload
 systemctl enable shytti
-echo "=> systemd service installed"
+systemctl start shytti
+echo "=> service started"
 
-# --- Kill any stale shytti ---
-pkill -9 -f 'shytti' 2>/dev/null || true
-sleep 1
+# --- Wait for token ---
+echo ""
+echo "waiting for pairing token..."
+echo ""
 
-# --- Pair ---
+# Tail journal until we see the token (base64 string starting with ey)
+timeout 10 journalctl -u shytti -f --no-pager -o cat 2>/dev/null | while read -r line; do
+    echo "$line"
+    case "$line" in
+        ey*) break ;;
+    esac
+done
+
 echo ""
 echo "============================================"
-echo "  shytti installed."
-echo "  starting pairing mode..."
-echo ""
-echo "  paste the token below into hermytt admin."
-echo "  after pairing succeeds, press ctrl+c."
-echo "  then: sudo systemctl start shytti"
+echo "  paste the token above into hermytt admin"
+echo "  shytti is running as a service already"
 echo "============================================"
-echo ""
-
-# Run pair in foreground — sysop ctrl+c's when done
-exec $BIN pair -c "$CONFIG"

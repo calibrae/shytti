@@ -50,12 +50,29 @@ async fn main() {
                 ).await;
             }
 
-            // Load stored long-lived key for Mode 2 reconnects
             let (app, state) = api::router_with_state(&cfg, manager, bridge);
             let key_path = control::key_path(&cfg.daemon.listen);
+            *state.key_path.lock().await = Some(key_path.clone());
+
+            let has_mode1 = !cfg.daemon.hermytt_url.contains("localhost") || !cfg.daemon.hermytt_key.is_empty();
+
             if let Some(key) = control::load_key(&key_path) {
+                // Already paired — accept reconnects
                 tracing::info!("loaded pairing key, accepting Mode 2 reconnects");
                 *state.long_lived_key.lock().await = Some(key);
+            } else if !has_mode1 {
+                // No hermytt config, no stored key → enter pairing mode
+                let (token, encoded) = control::PairToken::generate(&cfg.daemon.listen);
+                tracing::info!("no hermytt config and no pairing key — entering pair mode");
+                eprintln!();
+                eprintln!("PAIRING TOKEN (expires in 5 minutes):");
+                eprintln!("{encoded}");
+                eprintln!();
+                *state.pair_state.lock().await = Some(control::PairState {
+                    pair_key: token.key,
+                    long_lived_key: None,
+                    used: false,
+                });
             }
 
             let listener = tokio::net::TcpListener::bind(&cfg.daemon.listen).await.unwrap();
