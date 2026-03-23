@@ -34,6 +34,8 @@ pub struct HermyttSection {
 pub struct DaemonConfig {
     #[serde(default = "default_listen")]
     pub listen: String,
+    /// Address to announce to Hermytt registry. If unset, uses listen address.
+    pub advertise: Option<String>,
     #[serde(default = "default_hermytt_url")]
     pub hermytt_url: String,
     #[serde(default)]
@@ -70,7 +72,7 @@ fn default_scrollback() -> usize { 10000 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
-        Self { listen: default_listen(), hermytt_url: default_hermytt_url(), hermytt_key: String::new(), max_shells: None }
+        Self { listen: default_listen(), advertise: None, hermytt_url: default_hermytt_url(), hermytt_key: String::new(), max_shells: None }
     }
 }
 

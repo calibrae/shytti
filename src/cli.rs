@@ -12,6 +12,7 @@ pub enum Command {
     },
     List,
     Kill { id: String },
+    Pair { config: Option<PathBuf> },
 }
 
 pub fn parse() -> Command {
@@ -31,6 +32,10 @@ pub fn parse() -> Command {
             cmd: flag(&args, "--cmd"),
         },
         Some("list" | "ls") => Command::List,
+        Some("pair") => {
+            let config = flag(&args, "--config").or_else(|| flag(&args, "-c")).map(PathBuf::from);
+            Command::Pair { config }
+        }
         Some("kill") => {
             let id = args.get(1).cloned().unwrap_or_else(|| {
                 eprintln!("usage: shytti kill <id>");

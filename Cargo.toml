@@ -6,7 +6,7 @@ description = "Shell orchestrator daemon"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal"] }
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
 portable-pty = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

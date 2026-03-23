@@ -3,33 +3,44 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, State, WebSocketUpgrade},
+    extract::ws::WebSocket,
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
+    response::IntoResponse,
     routing::{delete, get, post},
 };
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
 use crate::bridge::HermyttBridge;
 use crate::config::Config;
+use crate::control::{self, ControlMsg, PairState, PairToken, gen_long_lived_key};
 use crate::error::Error;
 use crate::shell::{ShellInfo, ShellManager, SpawnRequest};
 
-/// Default max shells if not configured.
 const DEFAULT_MAX_SHELLS: usize = 64;
 
-struct AppState {
-    manager: ShellManager,
-    bridge: HermyttBridge,
+pub struct AppState {
+    pub manager: ShellManager,
+    pub bridge: Arc<HermyttBridge>,
     api_key: String,
     max_shells: usize,
     allowed_hosts: Vec<String>,
-    /// shell_id → hermytt session_id
     sessions: Mutex<HashMap<String, String>>,
+    /// Active pairing state (from `shytti pair`)
+    pub pair_state: Mutex<Option<PairState>>,
+    /// Long-lived key for Mode 2 reconnect
+    pub long_lived_key: Mutex<Option<String>>,
 }
 
-pub fn router(cfg: &Config, manager: ShellManager, bridge: HermyttBridge) -> Router {
+pub fn router(cfg: &Config, manager: ShellManager, bridge: Arc<HermyttBridge>) -> Router {
+    let (app, _state) = router_with_state(cfg, manager, bridge);
+    app
+}
+
+pub fn router_with_state(cfg: &Config, manager: ShellManager, bridge: Arc<HermyttBridge>) -> (Router, Arc<AppState>) {
     let allowed_hosts: Vec<String> = cfg.shells.iter()
         .filter_map(|s| s.host.clone())
         .collect();
@@ -41,19 +52,25 @@ pub fn router(cfg: &Config, manager: ShellManager, bridge: HermyttBridge) -> Rou
         max_shells: cfg.daemon.max_shells.unwrap_or(DEFAULT_MAX_SHELLS),
         allowed_hosts,
         sessions: Mutex::new(HashMap::new()),
+        pair_state: Mutex::new(None),
+        long_lived_key: Mutex::new(None),
     });
 
-    Router::new()
+    let app = Router::new()
         .route("/shells", post(spawn_shell))
         .route("/shells", get(list_shells))
         .route("/shells/{id}", delete(kill_shell))
         .route("/shells/{id}/resize", post(resize_shell))
+        .route("/pair", get(ws_pair))
+        .route("/control", get(ws_control))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
-        .layer(axum::extract::DefaultBodyLimit::max(65536)) // 64KB max body
-        .with_state(state)
+        .layer(axum::extract::DefaultBodyLimit::max(65536))
+        .with_state(state.clone());
+
+    (app, state)
 }
 
-pub async fn serve(cfg: Config, manager: ShellManager, bridge: HermyttBridge) -> Result<(), Error> {
+pub async fn serve(cfg: Config, manager: ShellManager, bridge: Arc<HermyttBridge>) -> Result<(), Error> {
     let app = router(&cfg, manager, bridge);
     let listener = tokio::net::TcpListener::bind(&cfg.daemon.listen).await?;
     tracing::info!(addr = %cfg.daemon.listen, "listening");
@@ -67,7 +84,13 @@ async fn auth_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> Result<axum::response::Response, StatusCode> {
-    // If no API key is configured, skip auth (local dev)
+    let path = request.uri().path();
+
+    // /pair and /control handle their own auth via WS first-message
+    if path == "/pair" || path == "/control" {
+        return Ok(next.run(request).await);
+    }
+
     if state.api_key.is_empty() {
         return Ok(next.run(request).await);
     }
@@ -85,6 +108,8 @@ async fn auth_middleware(
     }
 }
 
+// --- REST handlers ---
+
 async fn spawn_shell(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SpawnRequest>,
@@ -95,9 +120,9 @@ async fn spawn_shell(
         &state.allowed_hosts,
     ).await?;
 
-    // Bridge to Hermytt
     match state.bridge.attach(&id, &state.manager).await {
         Ok(session_id) => {
+            state.manager.set_session_id(&id, &session_id).await;
             state.sessions.lock().await.insert(id.clone(), session_id);
         }
         Err(e) => tracing::warn!(shell_id = %id, "hermytt bridge failed: {e}"),
@@ -117,13 +142,11 @@ async fn kill_shell(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ShellInfo>, Error> {
-    // Detach from Hermytt
     if let Some(session_id) = state.sessions.lock().await.remove(&id) {
         if let Err(e) = state.bridge.detach(&session_id).await {
             tracing::warn!(%id, "hermytt detach failed: {e}");
         }
     }
-
     Ok(Json(state.manager.kill(&id).await?))
 }
 
@@ -139,4 +162,191 @@ async fn resize_shell(
     Json(req): Json<ResizeRequest>,
 ) -> Result<(), Error> {
     state.manager.resize(&id, req.rows, req.cols).await
+}
+
+// --- Mode 2: /pair WS endpoint ---
+
+async fn ws_pair(
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_pair(socket, state))
+}
+
+async fn handle_pair(socket: WebSocket, state: Arc<AppState>) {
+    let (mut sink, mut stream) = socket.split();
+
+    // Expect first message: {"pair_key": "one-time-key"}
+    let pair_key = match stream.next().await {
+        Some(Ok(axum::extract::ws::Message::Text(text))) => {
+            let v: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => {
+                    let _ = sink.send(axum::extract::ws::Message::Text(
+                        r#"{"error":"invalid json"}"#.into()
+                    )).await;
+                    return;
+                }
+            };
+            match v.get("pair_key").and_then(|k| k.as_str()) {
+                Some(k) => k.to_string(),
+                None => {
+                    let _ = sink.send(axum::extract::ws::Message::Text(
+                        r#"{"error":"missing pair_key"}"#.into()
+                    )).await;
+                    return;
+                }
+            }
+        }
+        _ => return,
+    };
+
+    // Validate against active pair state
+    {
+        let mut ps = state.pair_state.lock().await;
+        match ps.as_ref() {
+            Some(p) if !p.used && p.pair_key == pair_key => {
+                // Valid! Mark as used
+                ps.as_mut().unwrap().used = true;
+            }
+            _ => {
+                let _ = sink.send(axum::extract::ws::Message::Text(
+                    r#"{"error":"invalid or expired pair key"}"#.into()
+                )).await;
+                return;
+            }
+        }
+    }
+
+    // Generate long-lived key and send it back
+    let llk = gen_long_lived_key();
+    *state.long_lived_key.lock().await = Some(llk.clone());
+
+    let resp = serde_json::json!({
+        "status": "paired",
+        "long_lived_key": llk,
+    });
+    if sink.send(axum::extract::ws::Message::Text(resp.to_string().into())).await.is_err() {
+        return;
+    }
+
+    tracing::info!("paired with hermytt (Mode 2)");
+
+    // Upgrade this connection to control channel
+    let sink = Arc::new(tokio::sync::Mutex::new(WsSinkAdapter(sink)));
+    let stream = WsStreamAdapter(stream);
+    let hostname = crate::bridge::gethostname();
+    control::run_control(sink, stream, &state.manager, &state.bridge, &hostname).await;
+}
+
+// --- Mode 2: /control WS endpoint (reconnect with long-lived key) ---
+
+async fn ws_control(
+    State(state): State<Arc<AppState>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_control(socket, state))
+}
+
+async fn handle_control(socket: WebSocket, state: Arc<AppState>) {
+    let (mut sink, mut stream) = socket.split();
+
+    // Expect first message: {"auth": "long-lived-key"}
+    let auth_key = match stream.next().await {
+        Some(Ok(axum::extract::ws::Message::Text(text))) => {
+            let v: serde_json::Value = match serde_json::from_str(&text) {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            match v.get("auth").and_then(|k| k.as_str()) {
+                Some(k) => k.to_string(),
+                None => return,
+            }
+        }
+        _ => return,
+    };
+
+    // Validate against stored long-lived key
+    {
+        let llk = state.long_lived_key.lock().await;
+        match llk.as_ref() {
+            Some(k) if *k == auth_key => {}
+            _ => {
+                let _ = sink.send(axum::extract::ws::Message::Text(
+                    r#"{"error":"unauthorized"}"#.into()
+                )).await;
+                return;
+            }
+        }
+    }
+
+    let _ = sink.send(axum::extract::ws::Message::Text(
+        r#"{"status":"ok"}"#.into()
+    )).await;
+
+    tracing::info!("hermytt reconnected (Mode 2)");
+
+    let sink = Arc::new(tokio::sync::Mutex::new(WsSinkAdapter(sink)));
+    let stream = WsStreamAdapter(stream);
+    let hostname = crate::bridge::gethostname();
+    control::run_control(sink, stream, &state.manager, &state.bridge, &hostname).await;
+}
+
+// --- Adapters: axum WS ↔ tungstenite Message ---
+
+use tokio_tungstenite::tungstenite::Message as TungMessage;
+
+struct WsSinkAdapter(futures_util::stream::SplitSink<WebSocket, axum::extract::ws::Message>);
+
+impl futures_util::Sink<TungMessage> for WsSinkAdapter {
+    type Error = tokio_tungstenite::tungstenite::Error;
+
+    fn poll_ready(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        std::pin::Pin::new(&mut self.0).poll_ready(cx)
+            .map_err(|_| tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+    }
+
+    fn start_send(mut self: std::pin::Pin<&mut Self>, item: TungMessage) -> Result<(), Self::Error> {
+        let axum_msg = match item {
+            TungMessage::Text(t) => axum::extract::ws::Message::Text(t.to_string().into()),
+            TungMessage::Binary(b) => axum::extract::ws::Message::Binary(b.to_vec().into()),
+            TungMessage::Close(_) => axum::extract::ws::Message::Close(None),
+            _ => return Ok(()),
+        };
+        std::pin::Pin::new(&mut self.0).start_send(axum_msg)
+            .map_err(|_| tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+    }
+
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        std::pin::Pin::new(&mut self.0).poll_flush(cx)
+            .map_err(|_| tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+    }
+
+    fn poll_close(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        std::pin::Pin::new(&mut self.0).poll_close(cx)
+            .map_err(|_| tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+    }
+}
+
+struct WsStreamAdapter(futures_util::stream::SplitStream<WebSocket>);
+
+impl futures_util::Stream for WsStreamAdapter {
+    type Item = Result<TungMessage, tokio_tungstenite::tungstenite::Error>;
+
+    fn poll_next(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Self::Item>> {
+        match std::pin::Pin::new(&mut self.0).poll_next(cx) {
+            std::task::Poll::Ready(Some(Ok(msg))) => {
+                let tung_msg = match msg {
+                    axum::extract::ws::Message::Text(t) => TungMessage::Text(t.to_string().into()),
+                    axum::extract::ws::Message::Binary(b) => TungMessage::Binary(b.to_vec().into()),
+                    axum::extract::ws::Message::Close(_) => TungMessage::Close(None),
+                    _ => return std::task::Poll::Ready(None),
+                };
+                std::task::Poll::Ready(Some(Ok(tung_msg)))
+            }
+            std::task::Poll::Ready(Some(Err(_))) => std::task::Poll::Ready(None),
+            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
 }

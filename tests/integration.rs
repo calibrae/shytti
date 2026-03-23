@@ -12,6 +12,7 @@ fn test_config() -> Config {
         shytti::config::DaemonConfig {
             listen: "127.0.0.1:0".into(),
             hermytt_url: "http://127.0.0.1:1".into(),
+            advertise: None,
             hermytt_key: String::new(),
             max_shells: Some(64),
         },
@@ -22,7 +23,7 @@ fn test_config() -> Config {
 
 async fn start_server() -> (String, ShellManager) {
     let manager = ShellManager::new();
-    let bridge = HermyttBridge::new("http://127.0.0.1:1", "test");
+    let bridge = std::sync::Arc::new(HermyttBridge::new("http://127.0.0.1:1", "test"));
     let cfg = test_config();
 
     let app = api::router(&cfg, manager.clone(), bridge);

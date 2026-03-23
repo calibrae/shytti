@@ -27,8 +27,8 @@ impl HermyttBridge {
     ) -> Result<String, Error> {
         let session_id = self.register_session(Some(shell_id)).await?;
 
-        let pty_reader = manager.get_reader(shell_id)?;
-        let pty_writer = manager.get_writer(shell_id)?;
+        let pty_reader = manager.get_reader(shell_id).await?;
+        let pty_writer = manager.get_writer(shell_id).await?;
 
         let ws_url = self.ws_url(&session_id);
         let (ws_stream, _) = tokio_tungstenite::connect_async(&ws_url)
@@ -118,31 +118,6 @@ impl HermyttBridge {
         self.unregister_session(session_id).await
     }
 
-    /// Announce to Hermytt registry and start heartbeat loop (every 15s).
-    pub fn start_heartbeat(&self, listen_addr: &str, manager: ShellManager) {
-        let url = format!("{}/registry/announce", self.base_url);
-        let auth_key = self.auth_key.clone();
-        let endpoint = format!("ws://{listen_addr}");
-        let hostname = gethostname();
-
-        tokio::spawn(async move {
-            let name = format!("shytti-{hostname}");
-            loop {
-                let count = manager.list().await.len();
-                let body = serde_json::json!({
-                    "name": name,
-                    "role": "shell",
-                    "endpoint": endpoint,
-                    "meta": {"host": hostname, "shells_active": count}
-                });
-                if let Err(e) = http_post(&url, &auth_key, &body.to_string()).await {
-                    tracing::warn!("heartbeat failed: {e}");
-                }
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            }
-        });
-    }
-
     async fn register_session(&self, id: Option<&str>) -> Result<String, Error> {
         let url = format!("{}/internal/session", self.base_url);
         let body = match id {
@@ -207,7 +182,7 @@ pub(crate) fn parse_url(url: &str) -> Result<(String, String), Error> {
     Ok((host.to_string(), format!("/{path}")))
 }
 
-fn gethostname() -> String {
+pub fn gethostname() -> String {
     std::process::Command::new("hostname")
         .output()
         .ok()

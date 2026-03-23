@@ -3,9 +3,9 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, Child, MasterPty, PtySize};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 
 use crate::error::Error;
 
@@ -77,17 +77,39 @@ pub struct SpawnRequest {
 struct ManagedShell {
     info: ShellInfo,
     master: Box<dyn MasterPty + Send>,
+    session_id: Option<String>,
+}
+
+/// Shell death event
+#[derive(Debug, Clone)]
+pub struct ShellDeath {
+    pub shell_id: String,
+    pub session_id: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct ShellManager {
     shells: Arc<Mutex<HashMap<String, ManagedShell>>>,
+    death_tx: broadcast::Sender<ShellDeath>,
 }
 
 impl ShellManager {
     pub fn new() -> Self {
+        let (death_tx, _) = broadcast::channel(64);
         Self {
             shells: Arc::new(Mutex::new(HashMap::new())),
+            death_tx,
+        }
+    }
+
+    pub fn on_death(&self) -> broadcast::Receiver<ShellDeath> {
+        self.death_tx.subscribe()
+    }
+
+    /// Associate a hermytt session_id with a shell (called after bridge attach)
+    pub async fn set_session_id(&self, shell_id: &str, session_id: &str) {
+        if let Some(shell) = self.shells.lock().await.get_mut(shell_id) {
+            shell.session_id = Some(session_id.to_string());
         }
     }
 
@@ -213,17 +235,38 @@ impl ShellManager {
             cmd.cwd(expand_tilde(cwd));
         }
 
-        let _child = pair.slave.spawn_command(cmd)
+        let child = pair.slave.spawn_command(cmd)
             .map_err(|e| Error::SpawnFailed(e.to_string()))?;
         drop(pair.slave);
 
         let managed = ManagedShell {
             info: ShellInfo { id: id.clone(), name, shell_type, status: ShellStatus::Running },
             master: pair.master,
+            session_id: None,
         };
 
         self.shells.lock().await.insert(id.clone(), managed);
         tracing::info!(shell_id = %id, "spawned");
+
+        // Watch for child exit
+        let shells = self.shells.clone();
+        let death_tx = self.death_tx.clone();
+        let watch_id = id.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut child = child;
+            let _ = child.wait();
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                if let Some(shell) = shells.lock().await.remove(&watch_id) {
+                    tracing::info!(shell_id = %watch_id, "shell exited");
+                    let _ = death_tx.send(ShellDeath {
+                        shell_id: watch_id,
+                        session_id: shell.session_id,
+                    });
+                }
+            });
+        });
+
         Ok(id)
     }
 
@@ -249,16 +292,16 @@ impl ShellManager {
     }
 
     /// Extract a cloned reader handle. Lock is released immediately.
-    pub fn get_reader(&self, id: &str) -> Result<Box<dyn Read + Send>, Error> {
-        let shells = self.shells.blocking_lock();
+    pub async fn get_reader(&self, id: &str) -> Result<Box<dyn Read + Send>, Error> {
+        let shells = self.shells.lock().await;
         let shell = shells.get(id).ok_or_else(|| Error::NotFound(id.to_string()))?;
         shell.master.try_clone_reader()
             .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))
     }
 
     /// Extract a writer handle. Lock is released immediately.
-    pub fn get_writer(&self, id: &str) -> Result<Box<dyn Write + Send>, Error> {
-        let shells = self.shells.blocking_lock();
+    pub async fn get_writer(&self, id: &str) -> Result<Box<dyn Write + Send>, Error> {
+        let shells = self.shells.lock().await;
         let shell = shells.get(id).ok_or_else(|| Error::NotFound(id.to_string()))?;
         shell.master.take_writer()
             .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))

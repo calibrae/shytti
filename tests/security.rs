@@ -13,6 +13,7 @@ fn config_with_auth(key: &str, max_shells: usize) -> Config {
         DaemonConfig {
             listen: "127.0.0.1:0".into(),
             hermytt_url: "http://127.0.0.1:1".into(),
+            advertise: None,
             hermytt_key: key.into(),
             max_shells: Some(max_shells),
         },
@@ -33,6 +34,7 @@ fn config_no_auth() -> Config {
         DaemonConfig {
             listen: "127.0.0.1:0".into(),
             hermytt_url: "http://127.0.0.1:1".into(),
+            advertise: None,
             hermytt_key: String::new(),
             max_shells: Some(3),
         },
@@ -43,7 +45,7 @@ fn config_no_auth() -> Config {
 
 async fn start_with_config(cfg: Config) -> String {
     let manager = ShellManager::new();
-    let bridge = HermyttBridge::new("http://127.0.0.1:1", "test");
+    let bridge = std::sync::Arc::new(HermyttBridge::new("http://127.0.0.1:1", "test"));
 
     let app = api::router(&cfg, manager, bridge);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
