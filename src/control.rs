@@ -159,6 +159,10 @@ pub async fn run_control<S, K>(
         }
     });
 
+    // Writers for Mode 2 sessions (session_id → PTY writer)
+    let writers: Arc<Mutex<std::collections::HashMap<String, Box<dyn Write + Send>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+
     // Process incoming messages
     while let Some(Ok(msg)) = stream.next().await {
         let Some(ctrl) = parse_msg(&msg) else {
@@ -203,6 +207,12 @@ pub async fn run_control<S, K>(
                             // Mode 2: multiplex PTY data over control WS
                             let s = session_id.unwrap_or_else(|| shell_id.clone());
                             manager.set_session_id(&shell_id, &s).await;
+
+                            // Take writer for this session (used by Input handler)
+                            match manager.get_writer(&shell_id).await {
+                                Ok(w) => { writers.lock().await.insert(s.clone(), w); }
+                                Err(e) => tracing::error!(%shell_id, "get_writer failed: {e}"),
+                            }
 
                             // Start PTY stdout → Data message task
                             match manager.get_reader(&shell_id).await {
@@ -278,15 +288,14 @@ pub async fn run_control<S, K>(
                     Ok(d) => d,
                     Err(_) => { tracing::warn!("input: bad base64"); continue; }
                 };
-                let shell_id = manager.shell_id_by_session(&session_id).await
-                    .unwrap_or_else(|| session_id.clone());
-                if let Ok(writer) = manager.get_writer(&shell_id).await {
-                    let mut w = writer;
-                    let _ = tokio::task::spawn_blocking(move || {
-                        w.write_all(&decoded)
-                    }).await;
+                let mut ws = writers.lock().await;
+                if let Some(w) = ws.get_mut(&session_id) {
+                    if let Err(e) = w.write_all(&decoded) {
+                        tracing::warn!(%session_id, "input write failed: {e}");
+                        ws.remove(&session_id);
+                    }
                 } else {
-                    tracing::warn!(%session_id, "input: no writer found");
+                    tracing::warn!(%session_id, "input: no writer for session");
                 }
             }
             _ => {}
