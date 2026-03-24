@@ -113,6 +113,13 @@ impl ShellManager {
         }
     }
 
+    /// Find shell_id by session_id
+    pub async fn shell_id_by_session(&self, session_id: &str) -> Option<String> {
+        self.shells.lock().await.values()
+            .find(|s| s.session_id.as_deref() == Some(session_id))
+            .map(|s| s.info.id.clone())
+    }
+
     pub async fn spawn_with_limits(
         &self,
         req: SpawnRequest,

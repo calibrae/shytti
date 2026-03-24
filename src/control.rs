@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +41,12 @@ pub enum ControlMsg {
     },
     Kill { shell_id: String },
     Resize { shell_id: String, cols: u16, rows: u16 },
+
+    // Data plane (Mode 2 — multiplexed over control WS)
+    // Shytti → Hermytt: PTY output
+    Data { session_id: String, data: String },
+    // Hermytt → Shytti: stdin
+    Input { session_id: String, data: String },
 }
 
 fn send_msg(msg: &ControlMsg) -> Message {
@@ -155,7 +161,12 @@ pub async fn run_control<S, K>(
 
     // Process incoming messages
     while let Some(Ok(msg)) = stream.next().await {
-        let Some(ctrl) = parse_msg(&msg) else { continue };
+        let Some(ctrl) = parse_msg(&msg) else {
+            if let Message::Text(t) = &msg {
+                tracing::warn!("control: unparseable message: {}", t);
+            }
+            continue;
+        };
 
         match ctrl {
             ControlMsg::AuthOk { .. } => {
@@ -173,24 +184,58 @@ pub async fn run_control<S, K>(
 
                 match result {
                     Ok(shell_id) => {
-                        // If Hermytt provided a session_id, use it.
-                        // Otherwise try bridge attach (Mode 1 only — Mode 2 has no reachable hermytt URL).
-                        let sid = if let Some(sid) = session_id {
-                            manager.set_session_id(&shell_id, &sid).await;
-                            sid
-                        } else if bridge.is_configured() {
-                            match bridge.attach(&shell_id, manager).await {
-                                Ok(sid) => {
-                                    manager.set_session_id(&shell_id, &sid).await;
-                                    sid
+                        let sid = if bridge.is_configured() {
+                            // Mode 1: use data pipe
+                            let s = if let Some(sid) = session_id {
+                                sid
+                            } else {
+                                match bridge.attach(&shell_id, manager).await {
+                                    Ok(sid) => sid,
+                                    Err(e) => {
+                                        tracing::warn!(%shell_id, "bridge attach: {e}");
+                                        shell_id.clone()
+                                    }
                                 }
-                                Err(e) => {
-                                    tracing::warn!(%shell_id, "bridge attach skipped: {e}");
-                                    shell_id.clone()
-                                }
-                            }
+                            };
+                            manager.set_session_id(&shell_id, &s).await;
+                            s
                         } else {
-                            shell_id.clone()
+                            // Mode 2: multiplex PTY data over control WS
+                            let s = session_id.unwrap_or_else(|| shell_id.clone());
+                            manager.set_session_id(&shell_id, &s).await;
+
+                            // Start PTY stdout → Data message task
+                            if let Ok(reader) = manager.get_reader(&shell_id).await {
+                                let data_sink = sink.clone();
+                                let data_sid = s.clone();
+                                tokio::spawn(async move {
+                                    let mut reader = reader;
+                                    loop {
+                                        let mut r = reader;
+                                        let (r_back, result): (Box<dyn std::io::Read + Send>, std::io::Result<Vec<u8>>) =
+                                            tokio::task::spawn_blocking(move || {
+                                                let mut buf = [0u8; 4096];
+                                                let n = r.read(&mut buf);
+                                                (r, n.map(|n| buf[..n].to_vec()))
+                                            }).await.unwrap_or_else(|_| panic!("pty read panicked"));
+                                        reader = r_back;
+                                        match result {
+                                            Ok(ref data) if data.is_empty() => break,
+                                            Ok(data) => {
+                                                let msg = ControlMsg::Data {
+                                                    session_id: data_sid.clone(),
+                                                    data: base64_encode(&data),
+                                                };
+                                                if data_sink.lock().await.send(send_msg(&msg)).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            Err(_) => break,
+                                        }
+                                    }
+                                });
+                            }
+                            s
                         };
                         let resp = ControlMsg::SpawnOk {
                             req_id,
@@ -223,6 +268,22 @@ pub async fn run_control<S, K>(
             ControlMsg::Resize { shell_id, cols, rows } => {
                 if let Err(e) = manager.resize(&shell_id, rows, cols).await {
                     tracing::warn!(%shell_id, "resize failed: {e}");
+                }
+            }
+            ControlMsg::Input { session_id, data } => {
+                let decoded = match base64_decode(&data) {
+                    Ok(d) => d,
+                    Err(_) => { tracing::warn!("input: bad base64"); continue; }
+                };
+                let shell_id = manager.shell_id_by_session(&session_id).await
+                    .unwrap_or_else(|| session_id.clone());
+                if let Ok(writer) = manager.get_writer(&shell_id).await {
+                    let mut w = writer;
+                    let _ = tokio::task::spawn_blocking(move || {
+                        w.write_all(&decoded)
+                    }).await;
+                } else {
+                    tracing::warn!(%session_id, "input: no writer found");
                 }
             }
             _ => {}
