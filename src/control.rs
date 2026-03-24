@@ -197,14 +197,16 @@ pub async fn run_control<S, K>(
                         let sid = session_id.unwrap_or_else(|| shell_id.clone());
                         manager.set_session_id(&shell_id, &sid).await;
 
-                        // Take writer (used by Input handler)
-                        match manager.get_writer(&shell_id).await {
+                        // Get reader first, then writer (order matters for portable-pty)
+                        let pty_reader = manager.get_reader(&shell_id).await;
+                        let pty_writer = manager.get_writer(&shell_id).await;
+
+                        match pty_writer {
                             Ok(w) => { writers.lock().await.insert(sid.clone(), w); }
                             Err(e) => tracing::error!(%shell_id, "get_writer failed: {e}"),
                         }
 
-                        // Start PTY stdout → Data messages over control WS
-                        match manager.get_reader(&shell_id).await {
+                        match pty_reader {
                             Err(e) => tracing::error!(%shell_id, "get_reader failed: {e}"),
                             Ok(reader) => {
                                 tracing::info!(%shell_id, session_id = %sid, "data relay started");
@@ -222,17 +224,25 @@ pub async fn run_control<S, K>(
                                             }).await.unwrap_or_else(|_| panic!("pty read panicked"));
                                         reader = r_back;
                                         match result {
-                                            Ok(ref data) if data.is_empty() => break,
+                                            Ok(ref data) if data.is_empty() => {
+                                                tracing::debug!(session_id = %data_sid, "pty EOF");
+                                                break;
+                                            }
                                             Ok(data) => {
+                                                tracing::debug!(session_id = %data_sid, bytes = data.len(), "sending data");
                                                 let msg = ControlMsg::Data {
                                                     session_id: data_sid.clone(),
                                                     data: base64_encode(&data),
                                                 };
                                                 if data_sink.lock().await.send(send_msg(&msg)).await.is_err() {
+                                                    tracing::warn!(session_id = %data_sid, "data send failed");
                                                     break;
                                                 }
                                             }
-                                            Err(_) => break,
+                                            Err(e) => {
+                                                tracing::warn!(session_id = %data_sid, "pty read error: {e}");
+                                                break;
+                                            }
                                         }
                                     }
                                 });
