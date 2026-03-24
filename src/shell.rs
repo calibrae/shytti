@@ -255,23 +255,40 @@ impl ShellManager {
         self.shells.lock().await.insert(id.clone(), managed);
         tracing::info!(shell_id = %id, "spawned");
 
-        // Watch for child exit
+        // Watch for child exit (poll-based so tokio can shut down cleanly)
         let shells = self.shells.clone();
         let death_tx = self.death_tx.clone();
         let watch_id = id.clone();
-        tokio::task::spawn_blocking(move || {
+        tokio::spawn(async move {
             let mut child = child;
-            let _ = child.wait();
-            let rt = tokio::runtime::Handle::current();
-            rt.block_on(async {
-                if let Some(shell) = shells.lock().await.remove(&watch_id) {
-                    tracing::info!(shell_id = %watch_id, "shell exited");
-                    let _ = death_tx.send(ShellDeath {
-                        shell_id: watch_id,
-                        session_id: shell.session_id,
-                    });
+            loop {
+                let exited = tokio::task::spawn_blocking({
+                    let mut c = child;
+                    move || {
+                        let result = c.try_wait();
+                        (c, result)
+                    }
+                }).await;
+                match exited {
+                    Ok((c, Ok(Some(_)))) => {
+                        // Child exited
+                        if let Some(shell) = shells.lock().await.remove(&watch_id) {
+                            tracing::info!(shell_id = %watch_id, "shell exited");
+                            let _ = death_tx.send(ShellDeath {
+                                shell_id: watch_id,
+                                session_id: shell.session_id,
+                            });
+                        }
+                        return;
+                    }
+                    Ok((c, Ok(None))) => {
+                        // Still running
+                        child = c;
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    }
+                    Ok((_, Err(_))) | Err(_) => return,
                 }
-            });
+            }
         });
 
         Ok(id)
