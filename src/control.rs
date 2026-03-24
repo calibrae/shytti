@@ -197,18 +197,10 @@ pub async fn run_control<S, K>(
                         let sid = session_id.unwrap_or_else(|| shell_id.clone());
                         manager.set_session_id(&shell_id, &sid).await;
 
-                        // Get reader first, then writer (order matters for portable-pty)
-                        let pty_reader = manager.get_reader(&shell_id).await;
-                        let pty_writer = manager.get_writer(&shell_id).await;
-
-                        match pty_writer {
-                            Ok(w) => { writers.lock().await.insert(sid.clone(), w); }
-                            Err(e) => tracing::error!(%shell_id, "get_writer failed: {e}"),
-                        }
-
-                        match pty_reader {
-                            Err(e) => tracing::error!(%shell_id, "get_reader failed: {e}"),
-                            Ok(reader) => {
+                        match manager.get_reader_writer(&shell_id).await {
+                            Err(e) => tracing::error!(%shell_id, "get_reader_writer failed: {e}"),
+                            Ok((reader, writer)) => {
+                                writers.lock().await.insert(sid.clone(), writer);
                                 tracing::info!(%shell_id, session_id = %sid, "data relay started");
                                 let data_sink = sink.clone();
                                 let data_sid = sid.clone();

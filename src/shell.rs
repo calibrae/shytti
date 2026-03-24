@@ -330,6 +330,17 @@ impl ShellManager {
         shell.master.take_writer()
             .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))
     }
+
+    /// Get both reader and writer in a single lock (avoids race between the two calls).
+    pub async fn get_reader_writer(&self, id: &str) -> Result<(Box<dyn Read + Send>, Box<dyn Write + Send>), Error> {
+        let shells = self.shells.lock().await;
+        let shell = shells.get(id).ok_or_else(|| Error::NotFound(id.to_string()))?;
+        let reader = shell.master.try_clone_reader()
+            .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+        let writer = shell.master.take_writer()
+            .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+        Ok((reader, writer))
+    }
 }
 
 pub(crate) fn expand_tilde(path: &str) -> String {
