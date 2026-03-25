@@ -2,7 +2,7 @@
 set -e
 
 # shytti install (Mode 2: manual pairing)
-# curl -sSL https://raw.githubusercontent.com/calibrae/shytti/main/install.sh | sudo bash
+# curl -sSL https://raw.githubusercontent.com/yttfam/shytti/main/install.sh | sudo bash
 
 INSTALL_DIR="/opt/shytti"
 BIN="$INSTALL_DIR/shytti"
@@ -18,7 +18,7 @@ case "$ARCH" in
     *) echo "unsupported arch: $ARCH"; exit 1 ;;
 esac
 
-URL="https://github.com/calibrae/shytti/releases/latest/download/shytti-${OS}-${ARCH}"
+URL="https://github.com/yttfam/shytti/releases/latest/download/shytti-${OS}-${ARCH}"
 
 # --- Install ---
 echo "=> installing shytti to $INSTALL_DIR"

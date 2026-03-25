@@ -3,7 +3,7 @@
 ## Setup
 
 ```bash
-git clone https://github.com/calibrae/shytti
+git clone https://github.com/yttfam/shytti
 cd shytti
 cargo build
 cargo test

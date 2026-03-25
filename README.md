@@ -22,7 +22,7 @@ shytti list                                # see everything
 shytti kill 1a2b-3                         # done with it
 ```
 
-Every shell pipes through [Hermytt](https://github.com/calibrae/hermytt) and renders in [Crytter](https://github.com/calibrae/crytter). Open a browser, see all your shells across all your machines.
+Every shell pipes through [Hermytt](https://github.com/yttfam/hermytt) and renders in [Crytter](https://github.com/yttfam/crytter). Open a browser, see all your shells across all your machines.
 
 ## Install
 
@@ -31,7 +31,7 @@ Every shell pipes through [Hermytt](https://github.com/calibrae/hermytt) and ren
 curl -H 'X-Hermytt-Key: TOKEN' http://hermytt:7777/bootstrap/shytti | sudo bash
 
 # Or grab a binary
-curl -LO https://github.com/calibrae/shytti/releases/latest/download/shytti-$(uname -s | tr A-Z a-z)-$(uname -m)
+curl -LO https://github.com/yttfam/shytti/releases/latest/download/shytti-$(uname -s | tr A-Z a-z)-$(uname -m)
 chmod +x shytti-*
 sudo mv shytti-* /usr/local/bin/shytti
 
