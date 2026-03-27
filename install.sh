@@ -19,6 +19,9 @@ esac
 
 URL="https://github.com/yttfam/shytti/releases/latest/download/shytti-${OS}-${ARCH}"
 
+# --- Detect run user (for macOS LaunchDaemon) ---
+RUN_USER="${SUDO_USER:-$(whoami)}"
+
 # --- Install ---
 echo "=> installing shytti to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
@@ -28,7 +31,7 @@ case "$OS" in
     darwin) launchctl bootout system/com.yttfam.shytti 2>/dev/null || true ;;
     *)      systemctl stop shytti 2>/dev/null || true ;;
 esac
-pkill -9 -f 'shytti serve' 2>/dev/null || true
+pkill -9 -f 'shytti daemon' 2>/dev/null || true
 sleep 1
 
 echo "=> downloading shytti-${OS}-${ARCH}"
@@ -49,6 +52,10 @@ else
     echo "=> config exists, keeping $CONFIG"
 fi
 
+# Make config readable by the run user
+chown "$RUN_USER" "$CONFIG" "$INSTALL_DIR"
+chmod 600 "$CONFIG"
+
 # --- Service install (platform-specific) ---
 case "$OS" in
     darwin)
@@ -60,10 +67,12 @@ case "$OS" in
 <dict>
     <key>Label</key>
     <string>com.yttfam.shytti</string>
+    <key>UserName</key>
+    <string>${RUN_USER}</string>
     <key>ProgramArguments</key>
     <array>
         <string>${BIN}</string>
-        <string>serve</string>
+        <string>daemon</string>
         <string>-c</string>
         <string>${CONFIG}</string>
     </array>
@@ -79,7 +88,7 @@ case "$OS" in
 </plist>
 EOF
         launchctl bootstrap system "$PLIST"
-        echo "=> launchd service started"
+        echo "=> launchd service started (user=$RUN_USER)"
 
         # --- Wait for token ---
         echo ""
@@ -105,7 +114,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$BIN serve -c $CONFIG
+ExecStart=$BIN daemon -c $CONFIG
 Restart=always
 RestartSec=2
 
