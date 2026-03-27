@@ -246,6 +246,10 @@ impl ShellManager {
             }
         };
 
+        // Set TERM to xterm-256color — universally available, including macOS
+        // which lacks tmux-256color terminfo. Prevents zsh ZLE dumb mode.
+        cmd.env("TERM", "xterm-256color");
+
         if let Some(cwd) = &req.cwd {
             cmd.cwd(expand_tilde(cwd));
         }
