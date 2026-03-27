@@ -3,6 +3,22 @@ mod cli;
 use cli::Command;
 use shytti::{api, config, control, shell};
 
+/// Write a crash message to a known location that shytti can always write to.
+/// This catches cases where launchd's stdout/stderr log isn't writable.
+fn crash_log(msg: &str) {
+    eprintln!("{msg}");
+    // Try the install dir (should be chowned to run user)
+    let path = std::path::Path::new("/opt/shytti/crash.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        use std::io::Write;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cmd = cli::parse();
@@ -13,7 +29,10 @@ async fn main() {
 
             let cfg = match config::Config::load(config) {
                 Ok(c) => c,
-                Err(e) => { eprintln!("config error: {e}"); std::process::exit(1); }
+                Err(e) => {
+                    crash_log(&format!("FATAL: config error: {e}"));
+                    std::process::exit(1);
+                }
             };
 
             tracing::info!("shytti starting");
@@ -67,9 +86,18 @@ async fn main() {
                 });
             }
 
-            let listener = tokio::net::TcpListener::bind(&cfg.daemon.listen).await.unwrap();
+            let listener = match tokio::net::TcpListener::bind(&cfg.daemon.listen).await {
+                Ok(l) => l,
+                Err(e) => {
+                    crash_log(&format!("FATAL: bind {} failed: {e}", cfg.daemon.listen));
+                    std::process::exit(1);
+                }
+            };
             tracing::info!(addr = %cfg.daemon.listen, "listening");
-            axum::serve(listener, app).await.unwrap();
+            if let Err(e) = axum::serve(listener, app).await {
+                crash_log(&format!("FATAL: server died: {e}"));
+                std::process::exit(1);
+            }
         }
         Command::Pair { config } => {
             tracing_subscriber::fmt().init();
@@ -100,9 +128,18 @@ async fn main() {
             let key_path = control::key_path(&cfg.daemon.listen);
             *state.key_path.lock().await = Some(key_path);
 
-            let listener = tokio::net::TcpListener::bind(&cfg.daemon.listen).await.unwrap();
+            let listener = match tokio::net::TcpListener::bind(&cfg.daemon.listen).await {
+                Ok(l) => l,
+                Err(e) => {
+                    crash_log(&format!("FATAL: bind {} failed: {e}", cfg.daemon.listen));
+                    std::process::exit(1);
+                }
+            };
             tracing::info!(addr = %cfg.daemon.listen, "listening (pair mode)");
-            axum::serve(listener, app).await.unwrap();
+            if let Err(e) = axum::serve(listener, app).await {
+                crash_log(&format!("FATAL: server died: {e}"));
+                std::process::exit(1);
+            }
         }
         Command::Spawn { name, shell, cwd, host, agent, cmd } => {
             let body = serde_json::json!({
