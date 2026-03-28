@@ -227,7 +227,11 @@ impl ShellManager {
 
         let mut cmd = match &shell_type {
             ShellType::Local => {
-                CommandBuilder::new(req.shell.as_deref().unwrap_or(&self.default_shell))
+                let shell = req.shell.as_deref().unwrap_or(&self.default_shell);
+                let mut cmd = CommandBuilder::new(shell);
+                // Spawn as login shell so it sources user profile (.zprofile, .bash_profile)
+                cmd.arg("-l");
+                cmd
             }
             ShellType::Remote => {
                 let mut cmd = CommandBuilder::new("ssh");
@@ -255,6 +259,17 @@ impl ShellManager {
         // Set TERM to xterm-256color — universally available, including macOS
         // which lacks tmux-256color terminfo. Prevents zsh ZLE dumb mode.
         cmd.env("TERM", "xterm-256color");
+
+        // Ensure PATH includes Homebrew and common locations.
+        // LaunchDaemons only get /usr/bin:/bin:/usr/sbin:/sbin.
+        // Login shell will layer the user's profile on top.
+        let path = std::env::var("PATH").unwrap_or_default();
+        if !path.contains("/opt/homebrew") {
+            cmd.env("PATH", format!(
+                "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:{}",
+                path
+            ));
+        }
 
         if let Some(cwd) = &req.cwd {
             cmd.cwd(expand_tilde(cwd));
