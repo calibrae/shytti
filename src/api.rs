@@ -255,8 +255,18 @@ async fn handle_control(socket: WebSocket, state: Arc<AppState>) {
     {
         let llk = state.long_lived_key.lock().await;
         match llk.as_ref() {
-            Some(k) if *k == auth_key => {}
-            _ => {
+            Some(k) if *k == auth_key => {
+                tracing::info!("control: auth accepted");
+            }
+            Some(_) => {
+                tracing::warn!("control: auth rejected — key mismatch");
+                let _ = sink.send(axum::extract::ws::Message::Text(
+                    r#"{"error":"unauthorized"}"#.into()
+                )).await;
+                return;
+            }
+            None => {
+                tracing::warn!("control: auth rejected — no long-lived key stored (pairing needed?)");
                 let _ = sink.send(axum::extract::ws::Message::Text(
                     r#"{"error":"unauthorized"}"#.into()
                 )).await;
@@ -296,6 +306,8 @@ impl futures_util::Sink<TungMessage> for WsSinkAdapter {
             TungMessage::Text(t) => axum::extract::ws::Message::Text(t.to_string().into()),
             TungMessage::Binary(b) => axum::extract::ws::Message::Binary(b.to_vec().into()),
             TungMessage::Close(_) => axum::extract::ws::Message::Close(None),
+            TungMessage::Ping(d) => axum::extract::ws::Message::Ping(d.to_vec().into()),
+            TungMessage::Pong(d) => axum::extract::ws::Message::Pong(d.to_vec().into()),
             _ => return Ok(()),
         };
         std::pin::Pin::new(&mut self.0).start_send(axum_msg)
