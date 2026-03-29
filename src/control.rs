@@ -185,9 +185,10 @@ pub async fn run_control<S, K>(
         }
     });
 
-    // Writers for Mode 2 sessions (session_id → PTY writer)
-    let writers: Arc<Mutex<std::collections::HashMap<String, Box<dyn Write + Send>>>> =
-        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // Writers for sessions (session_id → shared PTY writer)
+    // Uses std::sync types since PTY writes are blocking.
+    let writers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
     // Process incoming messages
     while let Some(Ok(msg)) = stream.next().await {
@@ -215,9 +216,9 @@ pub async fn run_control<S, K>(
                         .unwrap_or_else(|| s.id.clone());
 
                     // Re-attach data relay if not already wired
-                    if !writers.lock().await.contains_key(&sid) {
+                    if !writers.lock().unwrap().contains_key(&sid) {
                         if let Ok((reader, writer)) = manager.get_reader_writer(&s.id).await {
-                            writers.lock().await.insert(sid.clone(), writer);
+                            writers.lock().unwrap().insert(sid.clone(), writer);
                             let data_sink = sink.clone();
                             let data_sid = sid.clone();
                             let data_shell_id = s.id.clone();
@@ -287,7 +288,7 @@ pub async fn run_control<S, K>(
                         match manager.get_reader_writer(&shell_id).await {
                             Err(e) => tracing::error!(%shell_id, "get_reader_writer failed: {e}"),
                             Ok((reader, writer)) => {
-                                writers.lock().await.insert(sid.clone(), writer);
+                                writers.lock().unwrap().insert(sid.clone(), writer);
                                 tracing::info!(%shell_id, session_id = %sid, "data relay started");
                                 let data_sink = sink.clone();
                                 let data_sid = sid.clone();
@@ -344,7 +345,7 @@ pub async fn run_control<S, K>(
                 }
             }
             ControlMsg::Kill { shell_id } => {
-                writers.lock().await.remove(&shell_id);
+                writers.lock().unwrap().remove(&shell_id);
                 match manager.kill(&shell_id).await {
                     Ok(_) => {
                         let resp = ControlMsg::KillOk { shell_id };
@@ -363,10 +364,12 @@ pub async fn run_control<S, K>(
                     Ok(d) => d,
                     Err(_) => { tracing::warn!("input: bad base64"); continue; }
                 };
-                let mut ws = writers.lock().await;
+                let mut ws = writers.lock().unwrap();
                 if let Some(w) = ws.get_mut(&session_id) {
-                    if let Err(e) = w.write_all(&decoded) {
+                    let mut guard = w.lock().unwrap();
+                    if let Err(e) = guard.write_all(&decoded) {
                         tracing::warn!(%session_id, "input write failed: {e}");
+                        drop(guard);
                         ws.remove(&session_id);
                     }
                 } else {

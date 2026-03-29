@@ -80,6 +80,9 @@ struct ManagedShell {
     info: ShellInfo,
     master: Box<dyn MasterPty + Send>,
     session_id: Option<String>,
+    /// Stored after first take — shared via Arc so reconnects can reuse it.
+    /// Uses std::sync::Mutex since PTY writes are blocking.
+    writer: Option<Arc<std::sync::Mutex<Box<dyn Write + Send>>>>,
 }
 
 /// Shell death event
@@ -283,6 +286,7 @@ impl ShellManager {
             info: ShellInfo { id: id.clone(), name, shell_type, status: ShellStatus::Running },
             master: pair.master,
             session_id: None,
+            writer: None,
         };
 
         self.shells.lock().await.insert(id.clone(), managed);
@@ -365,13 +369,22 @@ impl ShellManager {
     }
 
     /// Get both reader and writer in a single lock (avoids race between the two calls).
-    pub async fn get_reader_writer(&self, id: &str) -> Result<(Box<dyn Read + Send>, Box<dyn Write + Send>), Error> {
-        let shells = self.shells.lock().await;
-        let shell = shells.get(id).ok_or_else(|| Error::NotFound(id.to_string()))?;
+    pub async fn get_reader_writer(&self, id: &str) -> Result<(Box<dyn Read + Send>, Arc<std::sync::Mutex<Box<dyn Write + Send>>>), Error> {
+        let mut shells = self.shells.lock().await;
+        let shell = shells.get_mut(id).ok_or_else(|| Error::NotFound(id.to_string()))?;
         let reader = shell.master.try_clone_reader()
             .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
-        let writer = shell.master.take_writer()
-            .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+        // First call takes the writer from the master; subsequent calls reuse the stored Arc.
+        let writer = match &shell.writer {
+            Some(w) => w.clone(),
+            None => {
+                let w = shell.master.take_writer()
+                    .map_err(|e| Error::Io(std::io::Error::other(e.to_string())))?;
+                let shared = Arc::new(std::sync::Mutex::new(w));
+                shell.writer = Some(shared.clone());
+                shared
+            }
+        };
         Ok((reader, writer))
     }
 }
