@@ -39,7 +39,7 @@ fn next_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
-    format!("{:x}-{ts:x}-{n}", std::process::id())
+    format!("{n}-{ts:x}-{:x}", std::process::id())
 }
 
 #[derive(Debug, Clone, Serialize)]
