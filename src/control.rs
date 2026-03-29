@@ -255,6 +255,9 @@ pub async fn run_control<S, K>(
                                     }
                                 }
                             });
+                            // Trigger SIGWINCH so the shell redraws its prompt.
+                            // Crytter will follow up with the real viewport size.
+                            let _ = manager.resize(&s.id, 24, 80).await;
                             tracing::info!(shell_id = %s.id, session_id = %sid, "re-attached data relay");
                         } else {
                             tracing::warn!(shell_id = %s.id, "failed to re-attach data relay");
