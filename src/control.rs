@@ -209,6 +209,14 @@ pub async fn run_control<S, K>(
                 tracing::info!("control: authenticated");
             }
             ControlMsg::ListShells => {
+                // Verify-on-list: prune any shells whose PTY process is dead.
+                // The death broadcast will fire shell_died for each, so Hermytt
+                // cleans up its registry too.
+                let pruned = manager.prune_dead().await;
+                if !pruned.is_empty() {
+                    tracing::info!(count = pruned.len(), "list_shells: pruned dead shells before responding");
+                }
+
                 let shells_info = manager.list().await;
                 let mut entries = Vec::new();
                 for s in &shells_info {

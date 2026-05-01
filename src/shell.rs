@@ -157,6 +157,32 @@ impl ShellManager {
         self.shells.lock().await.get(shell_id).map(|s| s.scrollback.clone())
     }
 
+    /// Walk the map and remove shells whose underlying process is dead.
+    /// Returns the list of (shell_id, session_id) that were pruned, so callers
+    /// can notify Hermytt via shell_died.
+    pub async fn prune_dead(&self) -> Vec<ShellDeath> {
+        let mut pruned = Vec::new();
+        let mut shells = self.shells.lock().await;
+        let dead_ids: Vec<String> = shells.iter()
+            .filter(|(_, shell)| !is_alive(shell))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in dead_ids {
+            if let Some(shell) = shells.remove(&id) {
+                tracing::info!(shell_id = %id, "pruned dead shell");
+                pruned.push(ShellDeath {
+                    shell_id: id,
+                    session_id: shell.session_id,
+                });
+            }
+        }
+        // Broadcast deaths so any listeners (control loop) propagate to Hermytt
+        for death in &pruned {
+            let _ = self.death_tx.send(death.clone());
+        }
+        pruned
+    }
+
     /// Get session_id for a shell
     pub async fn get_session_id(&self, shell_id: &str) -> Option<String> {
         self.shells.lock().await.get(shell_id)
@@ -421,6 +447,23 @@ impl ShellManager {
         };
         Ok((reader, writer))
     }
+}
+
+/// Check if a shell's underlying process is still alive.
+/// Uses kill(pgid, 0) on Unix. Returns true if we can't tell (be permissive).
+#[cfg(unix)]
+fn is_alive(shell: &ManagedShell) -> bool {
+    let Some(pgid) = shell.master.process_group_leader() else {
+        return true; // can't tell — assume alive
+    };
+    // SAFETY: kill(pid, 0) is signal-free, just checks existence.
+    // Returns 0 if alive, -1 with errno=ESRCH if dead.
+    unsafe { libc::kill(pgid, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn is_alive(_shell: &ManagedShell) -> bool {
+    true
 }
 
 pub(crate) fn expand_tilde(path: &str) -> String {

@@ -252,3 +252,45 @@ fn long_lived_key_format() {
     assert!(key.starts_with("sk-"), "key should start with sk-: {key}");
     assert!(key.len() > 10, "key should be reasonably long: {key}");
 }
+
+// --- Phantom shell pruning ---
+
+#[tokio::test]
+async fn prune_dead_keeps_live_shells() {
+    // Bug: stale shells in shytti's map flooded Hermytt's registry on reconnect.
+    // Fixed: build #27 — verify-on-list prunes dead shells before responding.
+    //
+    // We test the safe direction: prune_dead must NOT remove live shells.
+    // Killing-side coverage is exercised by the death watcher in shell.rs.
+    let mgr = ShellManager::new();
+
+    let id1 = mgr.spawn(SpawnRequest {
+        name: Some("alive-1".into()),
+        shell: None, cwd: None, host: None, agent: None,
+        cmd: Some("sleep 60".into()),
+    }).await.unwrap();
+    let id2 = mgr.spawn(SpawnRequest {
+        name: Some("alive-2".into()),
+        shell: None, cwd: None, host: None, agent: None,
+        cmd: Some("sleep 60".into()),
+    }).await.unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let pruned = mgr.prune_dead().await;
+    assert!(pruned.is_empty(), "live shells should not be pruned: {pruned:?}");
+
+    let remaining: Vec<String> = mgr.list().await.iter().map(|s| s.id.clone()).collect();
+    assert!(remaining.contains(&id1));
+    assert!(remaining.contains(&id2));
+
+    mgr.kill(&id1).await.ok();
+    mgr.kill(&id2).await.ok();
+}
+
+#[tokio::test]
+async fn prune_dead_on_empty_manager() {
+    let mgr = ShellManager::new();
+    let pruned = mgr.prune_dead().await;
+    assert!(pruned.is_empty());
+}
