@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="shytti" width="180"/></p>
+
 # shytti
 
 Shell orchestrator daemon. The sixth child of the YTT family.
