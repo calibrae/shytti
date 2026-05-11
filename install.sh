@@ -20,7 +20,7 @@ esac
 URL="https://github.com/yttfam/shytti/releases/latest/download/shytti-${OS}-${ARCH}"
 VERSION=$(curl -sI https://github.com/yttfam/shytti/releases/latest | grep -i ^location: | sed 's|.*/tag/||;s/[[:space:]]*$//')
 
-# --- Detect run user (for macOS LaunchDaemon) ---
+# --- Detect run user (Linux: systemd default; macOS: LaunchDaemon runs as root) ---
 RUN_USER="${SUDO_USER:-$(whoami)}"
 
 # --- Install ---
@@ -53,8 +53,14 @@ else
     echo "=> config exists, keeping $CONFIG"
 fi
 
-# Make config readable by the run user
-chown "$RUN_USER" "$CONFIG" "$INSTALL_DIR"
+# On macOS the LaunchDaemon runs as root (TCC Local Network privacy on macOS 26
+# Tahoe revokes per-user grants when the binary signature changes — running as
+# root bypasses it entirely). On Linux systemd defaults to root anyway.
+# So we keep config readable by root only.
+case "$OS" in
+    darwin) chown root:wheel "$CONFIG" "$INSTALL_DIR" ;;
+    *)      chown "$RUN_USER" "$CONFIG" "$INSTALL_DIR" ;;
+esac
 chmod 600 "$CONFIG"
 
 # --- Service install (platform-specific) ---
@@ -68,8 +74,6 @@ case "$OS" in
 <dict>
     <key>Label</key>
     <string>com.yttfam.shytti</string>
-    <key>UserName</key>
-    <string>${RUN_USER}</string>
     <key>ProgramArguments</key>
     <array>
         <string>${BIN}</string>
@@ -88,8 +92,12 @@ case "$OS" in
 </dict>
 </plist>
 EOF
+        # No UserName key → launchd runs us as root.
+        # Required on macOS 26 Tahoe: TCC Local Network privacy gates per-user
+        # LANs and revokes the grant whenever the binary signature changes.
+        # Same pattern as giorno-rs / act-runner.
         launchctl bootstrap system "$PLIST"
-        echo "=> launchd service started (user=$RUN_USER)"
+        echo "=> launchd service started (user=root)"
 
         # --- Wait for token ---
         echo ""
