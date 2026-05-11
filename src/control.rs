@@ -190,6 +190,12 @@ pub async fn run_control<S, K>(
     let writers: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>>>> =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
 
+    // Track per-session data relay tasks so we can abort them on disconnect.
+    // Without this they hold sink Arc clones, the WS stream never drops,
+    // and the underlying TCP socket sits in CLOSE_WAIT forever (FD leak).
+    let relay_tasks: std::sync::Arc<std::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+
     // Process incoming messages
     while let Some(Ok(msg)) = stream.next().await {
         // Handle WS-level ping → pong (split streams can't auto-respond)
@@ -244,7 +250,7 @@ pub async fn run_control<S, K>(
 
                             let data_sink = sink.clone();
                             let data_sid = sid.clone();
-                            tokio::spawn(async move {
+                            let handle = tokio::spawn(async move {
                                 let mut reader = reader;
                                 loop {
                                     let mut r = reader;
@@ -278,11 +284,21 @@ pub async fn run_control<S, K>(
                                     }
                                 }
                             });
+                            relay_tasks.lock().unwrap().push(handle);
                             // Trigger SIGWINCH so the shell redraws its prompt.
                             let _ = manager.resize(&s.id, 24, 80).await;
                             tracing::info!(shell_id = %s.id, session_id = %sid, "re-attached data relay");
                         } else {
-                            tracing::warn!(shell_id = %s.id, "failed to re-attach data relay");
+                            // Bug fix: re-attach failed → evict zombie shell + notify Hermytt.
+                            // Don't keep returning this shell in future list_shells responses.
+                            tracing::warn!(shell_id = %s.id, "re-attach failed — evicting zombie shell");
+                            let _ = manager.kill(&s.id).await;
+                            let died = ControlMsg::ShellDied {
+                                shell_id: s.id.clone(),
+                                session_id: Some(sid.clone()),
+                            };
+                            let _ = sink.lock().await.send(send_msg(&died)).await;
+                            continue; // skip — don't include in entries
                         }
                     }
 
@@ -318,7 +334,7 @@ pub async fn run_control<S, K>(
                                 tracing::info!(%shell_id, session_id = %sid, "data relay started");
                                 let data_sink = sink.clone();
                                 let data_sid = sid.clone();
-                                tokio::spawn(async move {
+                                let handle = tokio::spawn(async move {
                                     let mut reader = reader;
                                     loop {
                                         let mut r = reader;
@@ -352,6 +368,7 @@ pub async fn run_control<S, K>(
                                         }
                                     }
                                 });
+                                relay_tasks.lock().unwrap().push(handle);
                             }
                         }
                         let resp = ControlMsg::SpawnOk {
@@ -408,6 +425,24 @@ pub async fn run_control<S, K>(
 
     heartbeat.abort();
     death_watcher.abort();
+
+    // Abort all per-session relay tasks so they drop their sink Arc clones.
+    // Without this the sink stays alive, the WS stream is never fully dropped,
+    // and the underlying TCP socket sits in CLOSE_WAIT (FD leak).
+    let handles = {
+        let mut guard = relay_tasks.lock().unwrap();
+        std::mem::take(&mut *guard)
+    };
+    let aborted = handles.len();
+    for h in handles {
+        h.abort();
+    }
+    if aborted > 0 {
+        tracing::info!(count = aborted, "control: aborted relay tasks on disconnect");
+    }
+
+    // Drop writers map — releases shared PTY writers held by Input handler.
+    writers.lock().unwrap().clear();
 }
 
 // --- Mode 2: Pairing ---

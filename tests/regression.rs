@@ -294,3 +294,33 @@ async fn prune_dead_on_empty_manager() {
     let pruned = mgr.prune_dead().await;
     assert!(pruned.is_empty());
 }
+
+// --- Zombie eviction on re-attach failure ---
+
+#[tokio::test]
+async fn kill_removes_shell_from_list() {
+    // Bug: re-attach failure left zombie shells in list_shells responses.
+    // Fixed: build #28 — control loop calls manager.kill() on re-attach failure
+    // and sends shell_died. This test verifies the underlying kill behavior.
+    let mgr = ShellManager::new();
+    let id = mgr.spawn(SpawnRequest {
+        name: Some("zombie-test".into()),
+        shell: None, cwd: None, host: None, agent: None,
+        cmd: Some("sleep 60".into()),
+    }).await.unwrap();
+
+    assert!(mgr.list().await.iter().any(|s| s.id == id));
+
+    mgr.kill(&id).await.unwrap();
+
+    let remaining: Vec<String> = mgr.list().await.iter().map(|s| s.id.clone()).collect();
+    assert!(!remaining.contains(&id), "killed shell should be evicted");
+}
+
+#[tokio::test]
+async fn kill_nonexistent_returns_not_found() {
+    // Re-attach failure path also calls kill — must handle "already gone" gracefully.
+    let mgr = ShellManager::new();
+    let err = mgr.kill("phantom-id").await.unwrap_err();
+    assert!(matches!(err, shytti::error::Error::NotFound(_)));
+}
